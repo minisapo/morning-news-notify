@@ -13,98 +13,124 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# 国ごとの設定
+# country: NewsAPIのtop-headlinesで使う国コード
+# domains: 特定ニュースサイトのドメインから拾いたい場合
+# query: キーワード検索したい場合（国コードが無い/ヒットしない地域向け）
+COUNTRIES = [
+    {"name": "台湾", "query": "Taiwan"},
+    {"name": "中国本土", "query": "China"},
+    {"name": "アメリカ", "country": "us"},
+    {"name": "イギリス", "query": "UK OR Britain"},
+    {"name": "タイ", "query": "Thailand"},
+    {"name": "オーストラリア", "query": "Australia"},
+    {"name": "日本", "domains": "nhk.or.jp,asahi.com,mainichi.jp"},
+    {"name": "ハワイ", "query": "Hawaii"},
+]
 
-def fetch_top_headlines(category=None, country=None):
-    """カテゴリ別・国別のトップニュースを取得"""
-    url = "https://newsapi.org/v2/top-headlines"
-    params = {
-        "apiKey": NEWSAPI_KEY,
-        "pageSize": 5,
-    }
-    if category:
-        params["category"] = category
-    if country:
-        params["country"] = country
+
+def fetch_country_articles(country=None, domains=None, query=None):
+    """国ごとの設定に応じて記事を取得"""
+    if domains:
+        url = "https://newsapi.org/v2/everything"
+        params = {
+            "apiKey": NEWSAPI_KEY,
+            "domains": domains,
+            "sortBy": "publishedAt",
+            "pageSize": 10,
+        }
+    elif query:
+        url = "https://newsapi.org/v2/everything"
+        params = {
+            "apiKey": NEWSAPI_KEY,
+            "q": query,
+            "sortBy": "publishedAt",
+            "pageSize": 10,
+        }
     else:
-        params["country"] = "us"
+        url = "https://newsapi.org/v2/top-headlines"
+        params = {
+            "apiKey": NEWSAPI_KEY,
+            "country": country,
+            "pageSize": 10,
+        }
 
     response = requests.get(url, params=params)
     response.raise_for_status()
     return response.json().get("articles", [])
 
 
-def fetch_everything(query):
-    """キーワード検索でニュースを取得（トリップなど）"""
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "apiKey": NEWSAPI_KEY,
-        "q": query,
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": 5,
-    }
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    return response.json().get("articles", [])
+def summarize_country(name, articles):
+    """1ヶ国分の記事を「政治経済/エンタメ/その他」に分類し、見出し＋詳細で整理"""
+    if not articles:
+        return f"（{name}の記事が取得できませんでした）"
 
+    titles = "\n".join(f"- {a.get('title', '')}" for a in articles)
+    prompt = f"""以下は「{name}」の今日のニュース見出し一覧です。
+この中から、以下の3つのジャンルそれぞれについて最も注目すべき記事を1つずつ選び、日本語の見出しと2〜3行の詳細説明を作成してください。
 
-def fetch_japan_news():
-    """日本の主要ニュースサイトから記事を取得"""
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "apiKey": NEWSAPI_KEY,
-        "domains": "nhk.or.jp,asahi.com,mainichi.jp",
-        "sortBy": "publishedAt",
-        "pageSize": 5,
-    }
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    return response.json().get("articles", [])
+- 政治経済
+- エンタメ
+- その他（社会・国際・スポーツなど）
 
+該当する記事がジャンル内に見当たらない場合は、そのジャンルを省略してください（無理に当てはめないでください）。
 
-def summarize_news(news_by_genre):
-    """ジャンルごとのニュース記事をClaudeで日本語要約する"""
-    source_text = ""
-    for genre, articles in news_by_genre.items():
-        source_text += f"\n【{genre}】\n"
-        for a in articles:
-            title = a.get("title", "")
-            source_text += f"- {title}\n"
+出力形式（このフォーマットを厳守してください。他の文章は一切付け加えないでください）:
+■政治経済：（日本語見出し）
+（詳細説明）
 
-    prompt = f"""以下は今日の世界のニュース見出し一覧です。ジャンルごとに、日本語で3行以内の簡潔な要約を作成してください。
-見出しの単純な翻訳ではなく、全体像がわかるようにまとめてください。
+■エンタメ：（日本語見出し）
+（詳細説明）
 
-{source_text}
+■その他：（日本語見出し）
+（詳細説明）
 
-出力形式（このフォーマットを厳守してください）:
-【政治・一般】
-（要約）
-
-【経済】
-（要約）
-
-【エンタメ】
-（要約）
-
-【ローカル（日本）】
-（要約）
-
-【トリップ】
-（要約）
+元の見出し一覧:
+{titles}
 """
-
     message = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}]
     )
-    return message.content[0].text
+    return message.content[0].text.strip()
 
 
-def send_line_broadcast(text):
-    """LINE公式アカウントの友だち全員にテキストメッセージを一斉配信"""
+def build_flex_carousel(country_summaries):
+    """国ごとの要約をLINE Flexメッセージ（カルーセル）用に組み立てる"""
+    bubbles = []
+    for name, summary in country_summaries:
+        bubble = {
+            "type": "bubble",
+            "size": "kilo",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {"type": "text", "text": name, "weight": "bold", "size": "lg", "color": "#ffffff"}
+                ],
+                "backgroundColor": "#3B5998",
+                "paddingAll": "12px"
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {"type": "text", "text": summary, "wrap": True, "size": "sm"}
+                ]
+            }
+        }
+        bubbles.append(bubble)
+
+    return {
+        "type": "carousel",
+        "contents": bubbles
+    }
+
+
+def send_line_flex_broadcast(country_summaries):
+    """国別ニュースをFlexメッセージ(カルーセル)として1通で配信"""
+    today = datetime.now().strftime("%Y年%m月%d日")
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
@@ -112,18 +138,31 @@ def send_line_broadcast(text):
     }
     data = {
         "messages": [
-            {"type": "text", "text": text}
+            {
+                "type": "flex",
+                "altText": f"朝の世界ニュース - {today}",
+                "contents": build_flex_carousel(country_summaries)
+            }
         ]
     }
     response = requests.post(url, headers=headers, json=data)
     response.raise_for_status()
-    print("LINE送信完了")
+    print("LINE送信完了（Flexカルーセル）")
 
 
-def generate_html(summary_text):
-    """要約結果を簡易HTMLページとしてdocsフォルダに出力"""
+def generate_html(country_summaries):
+    """国別の要約を1ページのWebページとして出力"""
     today = datetime.now().strftime("%Y年%m月%d日")
-    html_body = summary_text.replace("\n", "<br>")
+
+    sections = ""
+    for name, summary in country_summaries:
+        summary_html = summary.replace("\n", "<br>")
+        sections += f"""
+<section>
+  <h2>{name}</h2>
+  <p>{summary_html}</p>
+</section>
+"""
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -133,11 +172,14 @@ def generate_html(summary_text):
 <style>
   body {{ font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; line-height: 1.8; }}
   h1 {{ font-size: 1.4em; border-bottom: 2px solid #333; padding-bottom: 8px; }}
+  section {{ margin-bottom: 24px; }}
+  h2 {{ font-size: 1.1em; color: #3B5998; border-left: 4px solid #3B5998; padding-left: 8px; }}
+  p {{ white-space: pre-wrap; }}
 </style>
 </head>
 <body>
 <h1>朝の世界ニュース - {today}</h1>
-<div>{html_body}</div>
+{sections}
 </body>
 </html>"""
 
@@ -148,16 +190,18 @@ def generate_html(summary_text):
 
 
 if __name__ == "__main__":
-    news_by_genre = {
-        "政治・一般": fetch_top_headlines(category="general"),
-        "経済": fetch_top_headlines(category="business"),
-        "エンタメ": fetch_top_headlines(category="entertainment"),
-        "ローカル（日本）": fetch_japan_news(),
-        "トリップ": fetch_everything("travel"),
-    }
+    country_summaries = []
+    for c in COUNTRIES:
+        articles = fetch_country_articles(
+            country=c.get("country"),
+            domains=c.get("domains"),
+            query=c.get("query"),
+        )
+        summary = summarize_country(c["name"], articles)
+        print(f"=== {c['name']} ===")
+        print(summary)
+        print()
+        country_summaries.append((c["name"], summary))
 
-    summary = summarize_news(news_by_genre)
-    print(summary)
-
-    generate_html(summary)
-    send_line_broadcast(summary)
+    generate_html(country_summaries)
+    send_line_flex_broadcast(country_summaries)
