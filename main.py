@@ -1,17 +1,18 @@
 import os
 import requests
+from datetime import datetime
 from dotenv import load_dotenv
 from anthropic import Anthropic
-import os
-import requests
-from dotenv import load_dotenv
 
 # .env ファイルを読み込む
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-client = Anthropic(api_key=ANTHROPIC_API_KEY)
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+
+client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
 
 def fetch_top_headlines(category=None, country=None):
     """カテゴリ別・国別のトップニュースを取得"""
@@ -25,7 +26,7 @@ def fetch_top_headlines(category=None, country=None):
     if country:
         params["country"] = country
     else:
-        params["country"] = "us"  # 世界のニュースは国指定必須なので、まずは米国発を基準にする
+        params["country"] = "us"
 
     response = requests.get(url, params=params)
     response.raise_for_status()
@@ -45,6 +46,8 @@ def fetch_everything(query):
     response = requests.get(url, params=params)
     response.raise_for_status()
     return response.json().get("articles", [])
+
+
 def fetch_japan_news():
     """日本の主要ニュースサイトから記事を取得"""
     url = "https://newsapi.org/v2/everything"
@@ -58,9 +61,9 @@ def fetch_japan_news():
     response.raise_for_status()
     return response.json().get("articles", [])
 
+
 def summarize_news(news_by_genre):
     """ジャンルごとのニュース記事をClaudeで日本語要約する"""
-    # プロンプト用にテキストを組み立てる
     source_text = ""
     for genre, articles in news_by_genre.items():
         source_text += f"\n【{genre}】\n"
@@ -100,6 +103,50 @@ def summarize_news(news_by_genre):
     return message.content[0].text
 
 
+def send_line_broadcast(text):
+    """LINE公式アカウントの友だち全員にテキストメッセージを一斉配信"""
+    url = "https://api.line.me/v2/bot/message/broadcast"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+    }
+    data = {
+        "messages": [
+            {"type": "text", "text": text}
+        ]
+    }
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    print("LINE送信完了")
+
+
+def generate_html(summary_text):
+    """要約結果を簡易HTMLページとしてdocsフォルダに出力"""
+    today = datetime.now().strftime("%Y年%m月%d日")
+    html_body = summary_text.replace("\n", "<br>")
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>朝の世界ニュース - {today}</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; line-height: 1.8; }}
+  h1 {{ font-size: 1.4em; border-bottom: 2px solid #333; padding-bottom: 8px; }}
+</style>
+</head>
+<body>
+<h1>朝の世界ニュース - {today}</h1>
+<div>{html_body}</div>
+</body>
+</html>"""
+
+    os.makedirs("docs", exist_ok=True)
+    with open("docs/index.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    print("Webページ生成完了: docs/index.html")
+
+
 if __name__ == "__main__":
     news_by_genre = {
         "政治・一般": fetch_top_headlines(category="general"),
@@ -111,3 +158,6 @@ if __name__ == "__main__":
 
     summary = summarize_news(news_by_genre)
     print(summary)
+
+    generate_html(summary)
+    send_line_broadcast(summary)
